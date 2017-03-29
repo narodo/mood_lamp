@@ -17,95 +17,26 @@
 
 #define AVERAGE_BUF_LEN 100
 #define SENSE_SAMPLES         100
-#define EDGE_SAMPLE_INTERVAL  50
+#define EDGE_SAMPLE_INTERVAL  200
 #define CALIBRATION_INTERVAL  60000
 #define CALIBRATION_TIME      500
 #define INITIAL_CALIBRATION   1000
+
+#define OFF_TIME              3000
 
 #define FALLING_EDGE            0
 #define RISING_EDGE             1
 #define NO_CHANGE               2
 
-struct average {
-  unsigned long cap_buffer[AVERAGE_BUF_LEN];
-  unsigned long cur;
-  unsigned long min;
-  unsigned long max;
-};
-static struct average average;
-static unsigned long max_sense =0;
+#define OFF                     2
+#define TOUCH                   1
+#define TOUCH_REMOVED           0
 
-static int touched = 0;
+#define RESET_EFFECTS           1
 
 CapacitiveSensor   cs = CapacitiveSensor(6,9);        // 10 megohm resistor between pins 4 & 8, pin 8 is sensor pin, add wire, foil
 WS2812FX ws2812fx = WS2812FX(LED_COUNT, LED_PIN, NEO_GRBW + NEO_KHZ800);
 
-// placeholder function in case we need to do something with sample value
-static __inline__ long do_sample () {
-  unsigned long sense;
-  sense =  cs.capacitiveSensor(SENSE_SAMPLES);
-  if (sense > max_sense) {
-    max_sense = sense;
-  }
-
-  return sense;
-}
-
-void do_average( ) {
-  unsigned int buf_index;
-  unsigned int items_in_buffer;
-  unsigned long long accumulated_average;
-
-  unsigned long previousMillis = millis();
-  unsigned long currentMillis = previousMillis;
-
-  buf_index = 0;
-  items_in_buffer = 0;
-
-  // reset average stats
-  average.min = 0xFFFFFFFF;
-  average.max = 0;
-
-  while ((currentMillis - previousMillis < CALIBRATION_TIME)) {
-    currentMillis = millis();
-
-    // catch overflow
-    if (currentMillis < previousMillis) {
-      Serial1.print("------ OVERFLOW -------");
-      previousMillis = currentMillis;
-      break;
-    }
-
-    // Calculate index in ring buffer
-    if (buf_index == (AVERAGE_BUF_LEN-1) ) {
-      buf_index=0;
-    } else {
-      buf_index++;
-    }
-    // get new average from values in ring buffer
-    average.cap_buffer[buf_index] = do_sample();
-
-    // count items in buffer to make sure we only average items recorded
-    if (items_in_buffer < AVERAGE_BUF_LEN) {
-      items_in_buffer++;
-    }
-  }
-
-  // calculate average
-  accumulated_average = 0;
-  for (unsigned int i=0; i<=items_in_buffer; i++) {
-    accumulated_average += average.cap_buffer[i];
-  }
-  average.cur = (unsigned long) (accumulated_average / items_in_buffer);
-
-  // record min and max values
-  if (average.cur > average.max) {
-    average.max = average.cur;
-  } else if (average.cur < average.min) {
-    average.min = average.cur;
-  }
-
-}
 
 unsigned int get_touch_value() {
   static unsigned int edge = 2;
@@ -117,14 +48,8 @@ unsigned int get_touch_value() {
   static unsigned long previousMillisEdge = 0;
   unsigned long currentMillis;
 
-  // try to get sensible initial default thresholds
-  if (average.max > 100) {
-    threshold_high = average.max + 500;
-    threshold_low = average.max + 100;
-  } else {
-    threshold_high = average.max * 10;
-    threshold_low = average.max * 2;
-  }
+  threshold_high = 250;
+  threshold_low =   60;
 
   // default edge
   edge = NO_CHANGE;
@@ -134,7 +59,7 @@ unsigned int get_touch_value() {
   if (currentMillis - previousMillisEdge >= EDGE_SAMPLE_INTERVAL) {
     previousMillisEdge = currentMillis;
 
-    sense = do_sample();
+    sense = cs.capacitiveSensor(128);
 
     // rotate input data buffer
     for (int i=3; i > 0; i--) {
@@ -160,90 +85,87 @@ unsigned int get_touch_value() {
   return edge;
 }
 
-void change_effect (unsigned int edge ) {
+void next_effect (unsigned char reset) {
 
-  static unsigned int effect_cnt = 0;
+  static unsigned int effect_cnt = 3;
 
-  if (edge == RISING_EDGE) {
-    if (effect_cnt == 5) {
-        effect_cnt=0;
+  if (reset == RESET_EFFECTS) {
+      effect_cnt=3;
+  } else {
+    if (effect_cnt == 3) {
+      effect_cnt=0;
     } else {
       effect_cnt++;
     }
   }
 
-  ws2812fx.setMode(FX_MODE_STATIC);
   switch (effect_cnt) {
     case 0:
-      ws2812fx.setColor(255,0,0);
-      break;
-    case 1:
-      ws2812fx.setColor(0,255,0);
-      break;
-    case 2:
-      ws2812fx.setColor(0,0,255);
-      break;
-    case 3:
-      ws2812fx.setColor(255,255,0);
-      break;
-    case 4:
-      ws2812fx.setColor(0, 255,255);
-      break;
-    case 5:
+      // smoke white
+      ws2812fx.setBrightness(255);
       ws2812fx.setColor(255,255,255);
+      ws2812fx.setMode(FX_MODE_STATIC);
+      break;
+
+    case 1:
+      ws2812fx.setBrightness(255);
+      ws2812fx.setSpeed(1);
+      ws2812fx.setMode(FX_MODE_RAINBOW);
+      break;
+
+    case 2:
+      ws2812fx.setBrightness(255);
+      ws2812fx.setColor(226,88,34);
+      ws2812fx.setSpeed(150);
+      ws2812fx.setMode(FX_MODE_FIRE_FLICKER_SOFT);
+      break;
+
+    case 3:
+      ws2812fx.setBrightness(128);
+      ws2812fx.setColor(255,163,67);
       break;
   }
 }
 
 void setup() {
 
-  Serial.begin(9600);
-  Serial1.begin(9600);
-
-  // initialize buffers and structs
-  for (int i=0; i<AVERAGE_BUF_LEN; i++){
-    average.cap_buffer[i] = do_sample();
-  }
-  average.cur = 0;
-  average.max = 0;
-  average.min = 0xFFFFFFFF;
+  Serial.begin(115200);
 
   ws2812fx.init();
-  ws2812fx.setBrightness(255);
-  ws2812fx.setSpeed(200);
-  ws2812fx.setColor(244,217,66);
+  ws2812fx.setBrightness(128);
+  ws2812fx.setColor(255,163,67);
   ws2812fx.start();
 
-  do_average();
 }
 
 void loop()
 {
-
-    static unsigned long previousMillisCalibration = 0;
-    // static unsigned long previousMillisPrint = 0;
-    unsigned long currentMillis = millis();
+    static unsigned long timeOn = 0;
+    static unsigned char state = TOUCH_REMOVED;
     unsigned int edge;
-
-    if (currentMillis - previousMillisCalibration >= CALIBRATION_INTERVAL) {
-      previousMillisCalibration = currentMillis;
-      if (touched == 0) {
-        do_average();
-        return;
-      }
-    }
 
     edge = get_touch_value();
 
     if (edge == RISING_EDGE) {
-      touched = 1;
-      //Serial1.print("---rising edge ---");
+      //Serial.print("---rising edge ---");
+      if (state == OFF) {
+        next_effect(RESET_EFFECTS);
+      } else {
+        next_effect(0);
+      }
+      state = TOUCH;
+      timeOn = millis();
+
     } else if (edge == FALLING_EDGE) {
-      touched = 0;
-      //Serial1.print("---falling edge ---");
+      if (state != OFF)
+        state = TOUCH_REMOVED;
     }
 
-    change_effect(edge);
+    if ((state == TOUCH) & (millis() - timeOn > OFF_TIME)) {
+      ws2812fx.setColor(0,0,0);
+      state = OFF;
+    }
+
     ws2812fx.service();
 
 }
